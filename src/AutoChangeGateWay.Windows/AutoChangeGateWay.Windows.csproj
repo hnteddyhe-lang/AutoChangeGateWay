@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net8.0-windows</TargetFramework></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../AutoChangeGateWay.Core/AutoChangeGateWay.Core.csproj" /></ItemGroup>
+  <ItemGroup><PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.1" /></ItemGroup>
+</Project>

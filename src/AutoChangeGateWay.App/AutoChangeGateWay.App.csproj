@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>AutoChangeGateWay</AssemblyName>
+    <Product>自动网关切换</Product>
+    <Description>按指定网卡检测与切换 IPv4 主备网关</Description>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../AutoChangeGateWay.Windows/AutoChangeGateWay.Windows.csproj" /></ItemGroup>
+</Project>
