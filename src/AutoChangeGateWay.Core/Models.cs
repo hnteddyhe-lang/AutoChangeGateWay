@@ -11,6 +11,7 @@ public sealed record AppSettings
     public string SourceAddress { get; init; } = "";
     public string PrimaryGateway { get; init; } = "192.168.88.191";
     public string BackupGateway { get; init; } = "192.168.88.1";
+    public bool FollowGatewayDns { get; init; }
     public int IntervalSeconds { get; init; } = 3;
     public int TimeoutMilliseconds { get; init; } = 1000;
     public int FailureThreshold { get; init; } = 3;
@@ -35,6 +36,9 @@ public sealed record AppSettings
             FailureThreshold is < 1 or > 30 || RecoveryThreshold is < 1 or > 30 || CooldownSeconds is < 0 or > 3600)
             throw new InvalidOperationException("检测参数超出允许范围。");
     }
+
+    public string DnsForGateway(string gateway) => gateway == PrimaryGateway || gateway == BackupGateway ? gateway
+        : throw new InvalidOperationException("DNS 目标必须对应已配置的主网关或备用网关。");
 }
 
 public static class IPv4
@@ -93,6 +97,19 @@ public sealed record DefaultRoute(string NextHop, uint Metric, int Protocol = 3,
 }
 
 public enum Health { Online, Offline, Unavailable }
+
+// 空的服务器列表表示自动获取；配置文件中的网络配置文件级覆盖也必须一并备份。
+public sealed record DnsConfiguration
+{
+    public string[] Servers { get; init; } = [];
+    public string[] ProfileServers { get; init; } = [];
+    public bool IsAutomatic => Servers.Length == 0 && ProfileServers.Length == 0;
+    public bool Matches(DnsConfiguration other) => Servers.SequenceEqual(other.Servers, StringComparer.OrdinalIgnoreCase) &&
+        ProfileServers.SequenceEqual(other.ProfileServers, StringComparer.OrdinalIgnoreCase);
+    public static DnsConfiguration ForServer(string server, bool profileOverride = false) => new()
+        { Servers = [server], ProfileServers = profileOverride ? [server] : [] };
+    public override string ToString() => IsAutomatic ? "自动获取 DNS" : string.Join("，", ProfileServers.Length > 0 ? ProfileServers : Servers);
+}
 public sealed record ProbeResult(Health Health, string Detail);
 public sealed record Decision(string? Target, string Message);
 
@@ -102,6 +119,8 @@ public interface IRoutePlatform
     IReadOnlyList<DefaultRoute> GetDefaultRoutes(Guid adapterId);
     void AddRoute(Guid adapterId, DefaultRoute route);
     void DeleteRoute(Guid adapterId, DefaultRoute expected);
+    DnsConfiguration GetDns(Guid adapterId);
+    void SetDns(Guid adapterId, DnsConfiguration configuration);
 }
 
 public interface IJournal
@@ -119,4 +138,6 @@ public sealed record RouteSession
     public DateTimeOffset BootTime { get; init; }
     public DefaultRoute[] Original { get; init; } = [];
     public DefaultRoute[] KnownRoutes { get; init; } = [];
+    public DnsConfiguration? OriginalDns { get; init; }
+    public DnsConfiguration[] KnownDns { get; init; } = [];
 }

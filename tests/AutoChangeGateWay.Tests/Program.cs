@@ -216,6 +216,122 @@ Test("恢复文件清理失败时仍保留恢复入口", () =>
     j.FailClear = false; m.Restore(); Equal<RouteSession?>(null, m.Session);
 });
 
+Test("DNS 开关默认关闭，切换网关不读取或修改 DNS", () =>
+{
+    var (p, j, m) = Setup(original); var dns = p.Dns;
+    p.ThrowDnsRead = true; m.Switch(config, config.BackupGateway);
+    Equal(0, p.DnsReads); Equal(0, p.DnsWrites); Equal(true, p.Dns.Matches(dns)); Equal<DnsConfiguration?>(null, j.Value!.OriginalDns);
+});
+Test("开启 DNS 跟随时，主备切换同步为对应网关", () =>
+{
+    var (p, j, m) = Setup(original); var dns = p.Dns;
+    var follow = config with { FollowGatewayDns = true };
+    m.Switch(follow, config.BackupGateway); Equal(config.BackupGateway, p.Dns.Servers.Single());
+    m.Switch(follow, config.PrimaryGateway); Equal(config.PrimaryGateway, p.Dns.Servers.Single());
+    Equal(true, j.Value!.OriginalDns!.Matches(dns));
+});
+Test("网关已是主网关时仍会同步错误的 DNS", () =>
+{
+    var (p, _, m) = Setup(original); var follow = config with { FollowGatewayDns = true };
+    Equal(true, m.NeedsDnsSync(follow, config.PrimaryGateway)); m.Switch(follow, config.PrimaryGateway);
+    Equal(config.PrimaryGateway, p.Dns.Servers.Single()); Equal(false, m.NeedsDnsSync(follow, config.PrimaryGateway));
+    Equal(false, p.Operations.Any(o => o.StartsWith("增加:") || o.StartsWith("删除:")));
+});
+Test("开启 DNS 后仅检测依然零写入", () =>
+{
+    var (p, j, m) = Setup(original);
+    Throws(() => m.Switch(config with { FollowGatewayDns = true, DetectionOnly = true }, config.BackupGateway), "仅检测");
+    Equal(0, p.Operations.Count); Equal(0, p.DnsWrites); Equal<RouteSession?>(null, j.Value);
+});
+Test("修改 DNS 前持久化原静态列表及意图", () =>
+{
+    var (p, j, m) = Setup(original); var dns = p.Dns;
+    j.BeforeSave = () => { Equal(0, p.DnsWrites); Equal(0, p.Operations.Count); };
+    m.Switch(config with { FollowGatewayDns = true }, config.BackupGateway);
+    Equal(true, j.Value!.OriginalDns!.Matches(dns)); Equal(true, j.Value.KnownDns.Any(d => d.Servers.SequenceEqual(new[] { config.BackupGateway })));
+});
+Test("DNS 设置失败时网关和 DNS 一起回滚", () =>
+{
+    var (p, _, m) = Setup(original); var dns = p.Dns; p.FailNextDns = true;
+    Throws(() => m.Switch(config with { FollowGatewayDns = true }, config.BackupGateway), "已回滚");
+    Equal(true, RouteManager.SameSet(p.Routes, [original])); Equal(true, p.Dns.Matches(dns));
+});
+Test("DNS 两级配置部分成功也能回滚", () =>
+{
+    var (p, _, m) = Setup(original);
+    p.Dns = new() { Servers = ["9.9.9.9"], ProfileServers = ["8.8.4.4"] };
+    var dns = p.Dns; p.FailNextDns = true; p.PartialDnsFailure = true;
+    Throws(() => m.Switch(config with { FollowGatewayDns = true }, config.BackupGateway), "已回滚");
+    Equal(true, p.Dns.Matches(dns)); Equal(true, RouteManager.SameSet(p.Routes, [original]));
+});
+Test("DNS 写入后会核对，未生效则回滚网关", () =>
+{
+    var (p, _, m) = Setup(original); var dns = p.Dns; p.IgnoreNextDnsWrite = true;
+    Throws(() => m.Switch(config with { FollowGatewayDns = true }, config.BackupGateway), "已回滚");
+    Equal(true, p.Dns.Matches(dns)); Equal(true, RouteManager.SameSet(p.Routes, [original]));
+});
+Test("恢复原配置会恢复原静态 DNS 列表和顺序", () =>
+{
+    var (p, _, m) = Setup(original); var dns = p.Dns;
+    m.Switch(config with { FollowGatewayDns = true }, config.BackupGateway); m.Restore();
+    Equal(true, p.Dns.Matches(dns)); Equal(true, RouteManager.SameSet(p.Routes, [original]));
+});
+Test("原来自动获取 DNS，恢复时恢复自动获取", () =>
+{
+    var (p, _, m) = Setup(original); p.Dns = new();
+    m.Switch(config with { FollowGatewayDns = true }, config.BackupGateway); m.Restore(); Equal(true, p.Dns.IsAutomatic);
+});
+Test("DNS 被外部修改后暂停操作，不覆盖外部配置", () =>
+{
+    var (p, _, m) = Setup(original); var follow = config with { FollowGatewayDns = true };
+    m.Switch(follow, config.BackupGateway); p.Dns = DnsConfiguration.ForServer("208.67.222.222"); int operations = p.Operations.Count;
+    Throws(() => m.Switch(follow, config.PrimaryGateway), "其他程序"); Throws(m.Restore, "其他程序");
+    Equal(operations, p.Operations.Count);
+});
+Test("关闭开关后后续切换不再修改 DNS，退出仍可恢复原值", () =>
+{
+    var (p, _, m) = Setup(original); var dns = p.Dns;
+    m.Switch(config with { FollowGatewayDns = true }, config.BackupGateway); int writes = p.DnsWrites;
+    m.Switch(config, config.PrimaryGateway); Equal(writes, p.DnsWrites); Equal(config.BackupGateway, p.Dns.Servers.Single());
+    m.Restore(); Equal(true, p.Dns.Matches(dns));
+});
+Test("已有正确网关和 DNS 时不重复落盘或写入", () =>
+{
+    var (p, j, m) = Setup(original); p.Dns = DnsConfiguration.ForServer(config.PrimaryGateway);
+    m.Switch(config with { FollowGatewayDns = true }, config.PrimaryGateway);
+    Equal(0, p.Operations.Count); Equal<RouteSession?>(null, j.Value);
+});
+Test("读取 DNS 失败时不修改路由", () =>
+{
+    var (p, _, m) = Setup(original); p.ThrowDnsRead = true;
+    Throws(() => m.Switch(config with { FollowGatewayDns = true }, config.BackupGateway), "读取 DNS"); Equal(0, p.Operations.Count);
+});
+Test("DNS 恢复记录跨重启仍保留，并只恢复 DNS", () =>
+{
+    var (p, j, m) = Setup(original); p.Dns = new(); m.Switch(config with { FollowGatewayDns = true }, config.BackupGateway);
+    j.Value = j.Value! with { BootTime = now.AddDays(-3) };
+    p.Routes.Clear(); p.Routes.Add(new("192.168.88.200", 10)); p.Adapter = p.Adapter with { Addresses = [new("192.168.99.100", 24)] };
+    int routeOperations = p.Operations.Count(o => !o.StartsWith("DNS:"));
+    var restarted = new RouteManager(p, j, () => now.AddHours(-1));
+    Equal(false, restarted.ClearPreviousBootSession()); restarted.Restore();
+    Equal(true, p.Dns.IsAutomatic); Equal(routeOperations, p.Operations.Count(o => !o.StartsWith("DNS:")));
+    Equal("192.168.88.200", p.Routes.Single().NextHop);
+});
+Test("跨重启静态 DNS 恢复遇到不同网络时保留记录", () =>
+{
+    var (p, j, m) = Setup(original); m.Switch(config with { FollowGatewayDns = true }, config.BackupGateway);
+    j.Value = j.Value! with { BootTime = now.AddDays(-3) }; p.Adapter = p.Adapter with { Addresses = [new("192.168.99.100", 24)] };
+    var restarted = new RouteManager(p, j, () => now.AddHours(-1)); int operations = p.Operations.Count;
+    Throws(restarted.Restore, "连接原网络"); Equal(operations, p.Operations.Count); Equal(true, restarted.Session != null);
+});
+Test("旧版路由记录升级后启用跟随会补记原 DNS", () =>
+{
+    var (p, j, m) = Setup(original); var dns = p.Dns;
+    m.Switch(config, config.BackupGateway); Equal<DnsConfiguration?>(null, j.Value!.OriginalDns);
+    m.Switch(config with { FollowGatewayDns = true }, config.BackupGateway); Equal(true, j.Value!.OriginalDns!.Matches(dns));
+    m.Restore(); Equal(true, p.Dns.Matches(dns)); Equal(true, RouteManager.SameSet(p.Routes, [original]));
+});
+
 Console.WriteLine($"\n总计 {passed + failed} 项，通过 {passed} 项，失败 {failed} 项。测试使用模拟网卡，不修改系统网络。");
 return failed == 0 ? 0 : 1;
 
@@ -226,6 +342,13 @@ sealed class FakePlatform(AdapterInfo adapter, DefaultRoute[] routes) : IRoutePl
     public List<string> Operations { get; } = [];
     public bool FailNextAdd { get; set; }
     public bool FailNextDelete { get; set; }
+    public DnsConfiguration Dns { get; set; } = new() { Servers = ["9.9.9.9", "8.8.8.8"] };
+    public int DnsReads { get; private set; }
+    public int DnsWrites { get; private set; }
+    public bool ThrowDnsRead { get; set; }
+    public bool FailNextDns { get; set; }
+    public bool PartialDnsFailure { get; set; }
+    public bool IgnoreNextDnsWrite { get; set; }
     public AdapterInfo GetAdapter(Guid id) => id == Adapter.Id ? Adapter : throw new Exception("网卡不存在");
     public IReadOnlyList<DefaultRoute> GetDefaultRoutes(Guid id) { GetAdapter(id); return Routes.ToArray(); }
     public void AddRoute(Guid id, DefaultRoute route)
@@ -239,6 +362,24 @@ sealed class FakePlatform(AdapterInfo adapter, DefaultRoute[] routes) : IRoutePl
         GetAdapter(id); if (FailNextDelete) { FailNextDelete = false; throw new Exception("模拟删除失败"); }
         Operations.Add("删除:" + expected.NextHop);
         Routes.Remove(Routes.Single(r => r.SameIdentity(expected)));
+    }
+    public DnsConfiguration GetDns(Guid id)
+    {
+        GetAdapter(id); DnsReads++;
+        if (ThrowDnsRead) throw new Exception("模拟读取 DNS 失败");
+        return Dns;
+    }
+    public void SetDns(Guid id, DnsConfiguration configuration)
+    {
+        GetAdapter(id); DnsWrites++;
+        if (FailNextDns)
+        {
+            FailNextDns = false;
+            if (PartialDnsFailure) Dns = Dns with { Servers = configuration.Servers };
+            throw new Exception("模拟 DNS 写入失败");
+        }
+        if (IgnoreNextDnsWrite) { IgnoreNextDnsWrite = false; return; }
+        Operations.Add("DNS:" + configuration); Dns = configuration;
     }
 }
 sealed class MemoryJournal : IJournal

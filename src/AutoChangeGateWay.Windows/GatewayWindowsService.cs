@@ -107,10 +107,15 @@ public sealed class GatewayWindowsService : ServiceBase
                         (desired == config.PrimaryGateway ? primary : backup).Health == Health.Online &&
                         primary.Health != Health.Unavailable && backup.Health != Health.Unavailable)
                         decision = new(desired, "重新应用被 DHCP 注入前正在使用的网关。");
+                    if (decision.Target == null && gateway != null && (gateway == config.PrimaryGateway || gateway == config.BackupGateway) &&
+                        (gateway == config.PrimaryGateway ? primary : backup).Health == Health.Online &&
+                        primary.Health != Health.Unavailable && backup.Health != Health.Unavailable && manager.NeedsDnsSync(config, gateway))
+                        decision = new(gateway, "同步当前网关对应的 DNS。");
                     if (!config.DetectionOnly && decision.Target != null)
                     {
+                        bool routeChanged = gateway != decision.Target || current.Count != 1;
                         manager.Switch(config, decision.Target); desired = decision.Target; gateway = desired;
-                        policy.Switched(DateTimeOffset.UtcNow);
+                        if (routeChanged) policy.Switched(DateTimeOffset.UtcNow);
                     }
                     Report(config.DetectionOnly ? "服务监控中 · 仅检测" : "服务监控中 · 自动切换",
                         config.DetectionOnly && decision.Target != null ? "仅检测，建议切换至 " + decision.Target : decision.Message,

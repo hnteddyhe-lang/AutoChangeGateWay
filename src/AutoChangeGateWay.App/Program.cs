@@ -35,7 +35,10 @@ internal static class Program
                     var source = a.Addresses.FirstOrDefault();
                     var probe = a.IsUp && source != null && entries.Count > 0 && entries[0].NextHop != "0.0.0.0"
                         ? WindowsNetwork.Probe(a, source.Address, entries[0].NextHop, 1000) : null;
-                    return new { Adapter = a, Routes = entries, Probe = probe };
+                    AutoChangeGateWay.Core.DnsConfiguration? dns = null;
+                    string? dnsError = null;
+                    try { dns = network.GetDns(a.Id); } catch (Exception error) { dnsError = error.Message; }
+                    return new { Adapter = a, Routes = entries, Probe = probe, Dns = dns, DnsError = dnsError };
                 }).ToArray();
                 File.WriteAllText(args[1], JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true }));
                 return 0;

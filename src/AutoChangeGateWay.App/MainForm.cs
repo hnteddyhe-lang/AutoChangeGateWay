@@ -23,8 +23,9 @@ public sealed partial class MainForm : Form
     private readonly NumericUpDown failures = Number(1, 30, 3);
     private readonly NumericUpDown recoveries = Number(1, 30, 5);
     private readonly NumericUpDown cooldown = Number(0, 3600, 30);
-    private readonly CheckBox detection = new() { Text = "仅检测，不更改网关", Checked = true, AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly CheckBox detection = new() { Text = "仅检测，不改网关和 DNS", Checked = true, AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly CheckBox failback = new() { Text = "主网关恢复后自动切回", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly CheckBox followDns = new() { Text = "DNS 跟随网关", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly Label current = Caption("读取中…");
     private readonly Label status = Caption("就绪 · 仅检测");
     private readonly Label detail = Caption("配置主备网关后，点击“开始监控”。");
@@ -169,8 +170,9 @@ public sealed partial class MainForm : Form
         Field("间隔 / 秒", interval, 0, 3); Field("超时 / 毫秒", timeout, 2, 3); Field("连续失败次数", failures, 4, 3);
         Field("冷却 / 秒", cooldown, 0, 4); grid.Controls.Add(detection, 2, 4); grid.SetColumnSpan(detection, 2);
         grid.Controls.Add(failback, 4, 4); grid.SetColumnSpan(failback, 2);
-        var hint = Caption("检测网关是否回应 Ping；只管理 IPv4 默认路由，不更改 IP 或 DNS。主备均无响应时保留当前路由。");
-        hint.ForeColor = Color.SlateGray; hint.Font = new Font(Font.FontFamily, 9F); grid.Controls.Add(hint, 0, 5); grid.SetColumnSpan(hint, 6);
+        grid.Controls.Add(followDns, 0, 5); grid.SetColumnSpan(followDns, 2);
+        var hint = Caption("开启后，主备切换时将所选网卡的 IPv4 DNS 同步设置为对应网关地址。");
+        hint.ForeColor = Color.SlateGray; hint.Font = new Font(Font.FontFamily, 9F); grid.Controls.Add(hint, 2, 5); grid.SetColumnSpan(hint, 4);
         settingsPanel.Controls.Add(grid); settingsPanel.Margin = new Padding(0, 0, 0, 6); root.Controls.Add(settingsPanel, 0, 2);
         root.Controls.Add(BuildRuntimePanel(), 0, 3);
 
@@ -218,6 +220,7 @@ public sealed partial class MainForm : Form
         interval.Value = Math.Clamp(value.IntervalSeconds, 1, 300); timeout.Value = Math.Clamp(value.TimeoutMilliseconds, 100, 10000);
         failures.Value = Math.Clamp(value.FailureThreshold, 1, 30); recoveries.Value = Math.Clamp(value.RecoveryThreshold, 1, 30);
         cooldown.Value = Math.Clamp(value.CooldownSeconds, 0, 3600); failback.Checked = value.AutoFailback; detection.Checked = value.DetectionOnly;
+        followDns.Checked = value.FollowGatewayDns;
         runtimeMode.SelectedIndex = value.RuntimeMode == RuntimeMode.WindowsService ? 1 : 0;
         startWithWindows.Checked = value.StartWithWindows; startMinimized.Checked = value.StartMinimized;
     }
@@ -232,6 +235,7 @@ public sealed partial class MainForm : Form
             IntervalSeconds = (int)interval.Value, TimeoutMilliseconds = (int)timeout.Value,
             FailureThreshold = (int)failures.Value, RecoveryThreshold = (int)recoveries.Value,
             CooldownSeconds = (int)cooldown.Value, AutoFailback = failback.Checked, DetectionOnly = detection.Checked,
+            FollowGatewayDns = followDns.Checked,
             RuntimeMode = ServiceMode ? RuntimeMode.WindowsService : RuntimeMode.Desktop,
             StartWithWindows = startWithWindows.Checked, StartMinimized = startMinimized.Checked
         };
@@ -342,12 +346,16 @@ public sealed partial class MainForm : Form
                         (desiredGateway == config.PrimaryGateway ? result.p : result.b).Health == Health.Online &&
                         result.p.Health != Health.Unavailable && result.b.Health != Health.Unavailable)
                         decision = new(desiredGateway, "默认路由被重新注入，重新应用本次运行正在使用的网关。");
+                    if (decision.Target == null && gateway != null && (gateway == config.PrimaryGateway || gateway == config.BackupGateway) &&
+                        (gateway == config.PrimaryGateway ? result.p : result.b).Health == Health.Online &&
+                        result.p.Health != Health.Unavailable && result.b.Health != Health.Unavailable && routes.NeedsDnsSync(config, gateway))
+                        decision = new(gateway, "同步当前网关对应的 DNS。");
                     if (decision.Target != null && !config.DetectionOnly)
                     {
                         await Task.Run(() => routes.Switch(config, decision.Target), token);
                         desiredGateway = decision.Target;
-                        policy.Switched(DateTimeOffset.UtcNow);
-                        AddLog("已切换到 " + decision.Target + "。" + decision.Message);
+                        if (gateway != decision.Target || result.currentRoutes.Count != 1) policy.Switched(DateTimeOffset.UtcNow);
+                        AddLog("已应用网关 " + decision.Target + (config.FollowGatewayDns ? "，DNS " + decision.Target : "") + "。" + decision.Message);
                         current.Text = DescribeRoutes(network.GetDefaultRoutes(config.AdapterId));
                         tray.ShowBalloonTip(3000, "网关已切换", $"{config.AdapterId} → {decision.Target}", ToolTipIcon.Info);
                         UpdateActions();
@@ -410,7 +418,7 @@ public sealed partial class MainForm : Form
             if (result.Health != Health.Online) throw new InvalidOperationException("目标网关检测未通过：" + result.Detail);
             networkOwnership ??= new NetworkOwnership();
             await Task.Run(() => routes.Switch(config, gateway)); desiredGateway = gateway;
-            storage.SaveSettings(config); ShowCurrentRoutes(); AddLog("手动切换完成：" + gateway);
+            storage.SaveSettings(config); ShowCurrentRoutes(); AddLog("手动切换完成：" + gateway + (config.FollowGatewayDns ? "，DNS " + gateway : ""));
             SetStatus("已手动切换", "当前使用 " + gateway + "；监控尚未启动。", false);
         }
         finally { operation.Release(); }

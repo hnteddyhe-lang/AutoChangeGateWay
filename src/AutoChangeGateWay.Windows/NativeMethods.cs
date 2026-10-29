@@ -44,6 +44,28 @@ internal static class NativeMethods
     [StructLayout(LayoutKind.Sequential)]
     internal struct RouteTable { public uint Count; public RouteRow First; }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DnsInterfaceSettings
+    {
+        public uint Version;
+        public ulong Flags;
+        public IntPtr Domain;
+        public IntPtr NameServer;
+        public IntPtr SearchList;
+        public uint RegistrationEnabled;
+        public uint RegisterAdapterName;
+        public uint EnableLlmnr;
+        public uint QueryAdapterName;
+        public IntPtr ProfileNameServer;
+    }
+
+    [DllImport("iphlpapi.dll", ExactSpelling = true)]
+    internal static extern uint GetInterfaceDnsSettings(Guid id, ref DnsInterfaceSettings settings);
+    [DllImport("iphlpapi.dll", ExactSpelling = true)]
+    internal static extern uint SetInterfaceDnsSettings(Guid id, in DnsInterfaceSettings settings);
+    [DllImport("iphlpapi.dll", ExactSpelling = true)]
+    internal static extern void FreeInterfaceDnsSettings(ref DnsInterfaceSettings settings);
+
     [DllImport("iphlpapi.dll", ExactSpelling = true)]
     internal static extern uint GetIpForwardTable2(ushort family, out IntPtr table);
     [DllImport("iphlpapi.dll", ExactSpelling = true)]
@@ -75,7 +97,8 @@ internal static class NativeMethods
     internal static void VerifyLayout()
     {
         if (Marshal.SizeOf<SockaddrInet>() != 28 || Marshal.SizeOf<AddressPrefix>() != 32 ||
-            Marshal.SizeOf<RouteRow>() != 104 || Marshal.OffsetOf<RouteTable>(nameof(RouteTable.First)).ToInt32() != 8)
+            Marshal.SizeOf<RouteRow>() != 104 || Marshal.OffsetOf<RouteTable>(nameof(RouteTable.First)).ToInt32() != 8 ||
+            Marshal.SizeOf<DnsInterfaceSettings>() != 64)
             throw new PlatformNotSupportedException("当前平台的 Windows 路由结构布局不匹配。");
     }
 }

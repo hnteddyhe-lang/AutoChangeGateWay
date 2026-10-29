@@ -18,12 +18,12 @@ var settings = new AppSettings { AdapterId = Guid.NewGuid(), SourceAddress = "19
 Test("旧版配置缺少运行选项时保持手动桌面模式", () =>
 {
     var legacy = JsonSerializer.Deserialize<AppSettings>("{\"PrimaryGateway\":\"192.168.88.191\"}")!;
-    Assert(legacy.RuntimeMode == RuntimeMode.Desktop && !legacy.StartWithWindows && legacy.StartMinimized, "旧配置默认行为改变。");
+    Assert(legacy.RuntimeMode == RuntimeMode.Desktop && !legacy.StartWithWindows && legacy.StartMinimized && !legacy.FollowGatewayDns, "旧配置默认行为改变。");
 });
 Test("服务与自启动设置可以完整保存及重新加载", () =>
 {
     var store = new AppStorage(Path.Combine(root, "config-" + Guid.NewGuid().ToString("N")));
-    var value = settings with { RuntimeMode = RuntimeMode.WindowsService, StartWithWindows = true, StartMinimized = false };
+    var value = settings with { RuntimeMode = RuntimeMode.WindowsService, StartWithWindows = true, StartMinimized = false, FollowGatewayDns = true };
     store.SaveSettings(value); Assert(store.LoadSettings() == value, "运行配置未完整往返保存。");
 });
 Test("运行方式无效时拒绝配置", () =>

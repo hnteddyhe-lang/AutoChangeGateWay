@@ -1,6 +1,6 @@
 # 自动网关切换 AutoChangeGateWay
 
-Windows 托盘 / 服务工具（0.2.0）。选择一张网卡，持续检测主网关；主网关连续无响应且备用在线时，切换该网卡的 IPv4 默认路由。
+Windows 托盘 / 服务工具（0.3.0）。选择一张网卡，持续检测主网关；主网关连续无响应且备用在线时，切换该网卡的 IPv4 默认路由。可通过“DNS 跟随网关”开关同步切换 DNS。
 
 默认主网关 `192.168.88.191`，备用网关 `192.168.88.1`，均可在界面修改。首次使用默认开启“仅检测”，不会修改网络。
 
@@ -10,9 +10,9 @@ Windows 托盘 / 服务工具（0.2.0）。选择一张网卡，持续检测主�
 
 ## 界面预览
 
-![AutoChangeGateWay 0.2.0 主界面：网卡与主备网关配置、检测参数、自启动和 Windows 服务设置](docs/images/main-window.png)
+![AutoChangeGateWay 0.3.0 主界面：网卡、主备网关、DNS 跟随开关、自启动和 Windows 服务设置](docs/images/main-window.png)
 
-截图来自 0.2.0 发布版的界面预览模式，使用示例网卡和 IP，未修改实际网络配置。默认勾选“仅检测”，可先观察网关状态，再启用实际切换。
+截图来自界面预览模式，使用示例网卡和 IP，未修改实际网络配置。默认勾选“仅检测”，可先观察网关状态，再启用实际切换。
 
 ## 应用场景
 
@@ -39,7 +39,7 @@ Windows 托盘 / 服务工具（0.2.0）。选择一张网卡，持续检测主�
 
 定时开关机由旁路由设备自身的计划任务、BIOS 或其他管理方式负责；本程序根据网关在线状态切换，不负责开关旁路由。需要电脑开机后、无人登录时也持续监控，可以在“运行方式”中选择 Windows 服务并开启“随 Windows 自动启动”；日常登录后使用则可选择桌面托盘自启动。
 
-旁路由关闭后，电脑的 DNS 也必须仍然可用。如果 DNS 只指向旁路由，切到主路由后仍可能无法解析域名；本程序不会自动修改 DNS。Ping 成功也不代表旁路由的代理、DNS 或互联网转发服务一定正常，现有连接在切换出口后可能需要重连。
+旁路由关闭后，电脑的 DNS 也必须仍然可用。可勾选“DNS 跟随网关”，在切到主路由时将 DNS 一起改为主路由地址；不勾选时程序保留当前 DNS。Ping 成功也不代表旁路由的代理、DNS 或互联网转发服务一定正常，现有连接在切换出口后可能需要重连。
 
 ### 旁路由维护、升级或偶发失联
 
@@ -63,7 +63,22 @@ Windows 托盘 / 服务工具（0.2.0）。选择一张网卡，持续检测主�
 - 通过“退出”或托盘“退出并恢复”离开时，程序尝试恢复原配置；恢复失败会提示，并保留恢复记录。
 - 异常退出后，重新打开程序会提示待恢复记录。请先恢复，再开始新的实际切换。
 
-本程序直接调用 Windows IP Helper API，不启动命令行修改网络。路由修改仅在本次系统运行期间生效，不修改持久网关、IP、掩码、DNS 或 IPv6；系统重启后由 Windows 的原有配置重新生成路由。
+本程序直接调用 Windows IP Helper API，不启动命令行修改网络。路由修改仅在本次系统运行期间生效，不修改持久网关、IP、掩码或 IPv6；系统重启后由 Windows 的原有配置重新生成路由。DNS 是否随切换修改，由下面的开关控制。
+
+## DNS 跟随网关
+
+用于减少网关切换后，系统 DNS 仍指向旧网关、解析请求偏离预期出口的情况。该功能只控制所选网卡的 IPv4 DNS；浏览器或应用自带的 DoH / DoT、其他网卡和 IPv6 DNS 不在控制范围内，因此不能单凭这个开关保证所有 DNS 流量都不泄露。
+
+界面只增加一个“DNS 跟随网关”开关，默认关闭，兼容旧版配置：
+
+- **开启**：主网关对应的 IPv4 DNS 为主网关地址，备用网关对应的 IPv4 DNS 为备用网关地址。例如 `192.168.88.191` 与 `192.168.88.1`。
+- **关闭**：切换网关时不修改 DNS。关闭开关不会立即撤销此前已经修改的 DNS；可以通过“恢复原配置”还原。
+
+桌面手动切换、自动故障切换、自动回切和 Windows 服务均使用该开关。检测到当前主 / 备用网关在线时，即使网关本身无需变化，也会核对并同步 DNS。“仅检测”模式不会修改网关或 DNS。服务模式更改开关后需要重新点击“应用运行设置”。
+
+修改前会保存原 DNS 的静态服务器列表或自动获取状态；设置失败时尝试连同网关一起回滚，“恢复原配置”、正常退出桌面程序或停止服务时还原原 DNS。DNS 修改属于持久配置，因此异常退出或重启后会保留 DNS 恢复记录，跨重启恢复时不回写上次开机的旧路由。若原网卡、源 IP 或 DNS 被外部更改，恢复可能暂停并提示。
+
+DNS 跟随功能需要 Windows 10 2004（19041）或更高版本，只管理所选网卡的 IPv4 DNS，不修改其他网卡或 IPv6 DNS。对应网关需要自身提供可用的 DNS 服务；本程序的在线检测仍是 Ping，不检测 DNS 服务是否正常。
 
 ## 检测与适用范围
 
@@ -75,7 +90,7 @@ Windows 托盘 / 服务工具（0.2.0）。选择一张网卡，持续检测主�
 
 DHCP 重新注入原默认路由时，监控可以在当前使用的目标网关在线、且所有路由均属于已知记录的条件下重新应用目标网关。发现未知默认路由、源 IP 变化、断开或网络配置冲突时，停止本轮写入并提示。换网络前应停止监控并恢复原配置。
 
-切换会改变后续连接的路径，已有连接可能需要重连。如果 DNS 本身指向已失联的主网关，默认网关切换后仍可能无法解析域名；本版保持 DNS 原配置，需要单独配置可用 DNS。
+切换会改变后续连接的路径，已有连接可能需要重连。如果 DNS 本身指向已失联的主网关，可开启“DNS 跟随网关”，或自行配置持续可用的 DNS。
 
 ## 自启动与 Windows 服务
 
@@ -126,7 +141,7 @@ DHCP 重新注入原默认路由时，监控可以在当前使用的目标网关
 .\build.ps1 -SelfContained -Runtime win-arm64
 ```
 
-默认输出 `artifacts\AutoChangeGateWay-0.2.0-win-x64\AutoChangeGateWay.exe` 和对应 ZIP；独立版目录名追加 `-standalone`。
+默认输出 `artifacts\AutoChangeGateWay-0.3.0-win-x64\AutoChangeGateWay.exe` 和对应 ZIP；独立版目录名追加 `-standalone`。
 
 结构：
 
@@ -139,7 +154,7 @@ DHCP 重新注入原默认路由时，监控可以在当前使用的目标网关
 在管理员 PowerShell 中执行可选集成测试（先编译）：
 
 ```powershell
-dotnet tests/AutoChangeGateWay.WindowsTests/bin/Release/net8.0-windows/AutoChangeGateWay.WindowsTests.dll artifacts/validation/runtime-integration --integration --app artifacts/AutoChangeGateWay-0.2.0-win-x64-standalone/AutoChangeGateWay.exe
+dotnet tests/AutoChangeGateWay.WindowsTests/bin/Release/net8.0-windows/AutoChangeGateWay.WindowsTests.dll artifacts/validation/runtime-integration --integration --app artifacts/AutoChangeGateWay-0.3.0-win-x64-standalone/AutoChangeGateWay.exe
 ```
 
 完整验证范围及当前权限限制见 [验证记录](docs/验证记录.md)。

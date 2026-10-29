@@ -8,6 +8,8 @@ public sealed class RouteManager(IRoutePlatform platform, IJournal journal, Func
     public bool ClearPreviousBootSession()
     {
         if (Session == null || Math.Abs((Session.BootTime - bootTime()).TotalSeconds) < 120) return false;
+        // DNS 是持久配置，跨重启也不能丢弃恢复记录；Restore 将仅恢复 DNS，不回写旧路由。
+        if (Session.OriginalDns != null) return false;
         journal.Clear(); // 原生 API 仅操作运行时路由；上次开机的记录不能用于覆盖本次 DHCP 配置。
         Session = null;
         return true;
@@ -33,20 +35,34 @@ public sealed class RouteManager(IRoutePlatform platform, IJournal journal, Func
             if (before.Any(r => !IPv4.IsOnLink(source.Address, source.PrefixLength, r.NextHop)))
                 throw new InvalidOperationException("原默认路由不是同网段的普通网关，首版不接管该配置。");
         }
-        if (Session != null) EnsureKnown(before, Session);
-        if (before.Length == 1 && before[0].NextHop == gateway) return;
-        var target = new DefaultRoute(gateway, Session?.Original.FirstOrDefault()?.Metric ?? before.FirstOrDefault()?.Metric ?? 25);
+        var beforeDns = settings.FollowGatewayDns ? platform.GetDns(settings.AdapterId) : null;
+        var targetDns = beforeDns != null ? DnsConfiguration.ForServer(settings.DnsForGateway(gateway), beforeDns.ProfileServers.Length > 0) : null;
+        if (Session != null)
+        {
+            EnsureKnown(before, Session);
+            if (beforeDns != null) EnsureKnownDns(beforeDns, Session);
+        }
+        if (before.Length == 1 && before[0].NextHop == gateway && (targetDns == null || beforeDns!.Matches(targetDns))) return;
+        var target = before.FirstOrDefault(r => r.NextHop == gateway)
+            ?? new DefaultRoute(gateway, Session?.Original.FirstOrDefault()?.Metric ?? before.FirstOrDefault()?.Metric ?? 25);
         var session = Session ?? new RouteSession
         {
             AdapterId = settings.AdapterId, SourceAddress = settings.SourceAddress,
             CapturedAt = DateTimeOffset.UtcNow, BootTime = bootTime(), Original = before
         };
-        session = session with { KnownRoutes = session.KnownRoutes.Concat(before).Append(target).Distinct().ToArray() };
+        session = session with
+        {
+            KnownRoutes = session.KnownRoutes.Concat(before).Append(target).Distinct().ToArray(),
+            OriginalDns = session.OriginalDns ?? beforeDns,
+            KnownDns = beforeDns != null ? session.KnownDns.Append(beforeDns).Append(targetDns!)
+                .DistinctBy(d => string.Join(",", d.Servers) + "|" + string.Join(",", d.ProfileServers)).ToArray() : session.KnownDns
+        };
         journal.Save(session);
         Session = session;
         try
         {
             Replace(settings.AdapterId, before, [target]);
+            if (beforeDns != null) ReplaceDns(settings.AdapterId, beforeDns, targetDns!);
         }
         catch (Exception error)
         {
@@ -55,12 +71,18 @@ public sealed class RouteManager(IRoutePlatform platform, IJournal journal, Func
                 var current = platform.GetDefaultRoutes(settings.AdapterId).ToArray();
                 EnsureKnown(current, session);
                 Replace(settings.AdapterId, current, before);
+                if (beforeDns != null)
+                {
+                    var currentDns = platform.GetDns(settings.AdapterId);
+                    EnsureKnownDns(currentDns, session);
+                    ReplaceDns(settings.AdapterId, currentDns, beforeDns);
+                }
             }
             catch (Exception rollback)
             {
                 throw new InvalidOperationException($"切换失败：{error.Message}；回滚也未完成：{rollback.Message}。恢复记录已保留，请点击恢复原配置。", error);
             }
-            throw new InvalidOperationException($"切换失败，已回滚到切换前路由：{error.Message}", error);
+            throw new InvalidOperationException($"切换失败，已回滚到切换前的路由和 DNS：{error.Message}", error);
         }
     }
 
@@ -68,7 +90,10 @@ public sealed class RouteManager(IRoutePlatform platform, IJournal journal, Func
     {
         var session = Session ?? throw new InvalidOperationException("没有待恢复的路由记录。");
         if (Math.Abs((session.BootTime - bootTime()).TotalSeconds) >= 120)
-            throw new InvalidOperationException("恢复记录属于上次开机，不能应用到当前网络。");
+        {
+            RestoreDnsAfterReboot(session);
+            journal.Clear(); Session = null; return;
+        }
         var adapter = platform.GetAdapter(session.AdapterId);
         if (!adapter.IsUp) throw new InvalidOperationException("原网卡未连接，请连接后再恢复。");
         var source = adapter.Addresses.SingleOrDefault(a => a.Address == session.SourceAddress)
@@ -84,9 +109,48 @@ public sealed class RouteManager(IRoutePlatform platform, IJournal journal, Func
         }).Where(r => r.ValidLifetime > 0).ToArray();
         var current = platform.GetDefaultRoutes(session.AdapterId).ToArray();
         EnsureKnown(current, session);
+        var currentDns = session.OriginalDns != null ? platform.GetDns(session.AdapterId) : null;
+        if (currentDns != null) EnsureKnownDns(currentDns, session);
         Replace(session.AdapterId, current, original);
+        if (currentDns != null) ReplaceDns(session.AdapterId, currentDns, session.OriginalDns!);
         journal.Clear();
         Session = null;
+    }
+
+    public bool NeedsDnsSync(AppSettings settings, string gateway)
+    {
+        if (!settings.FollowGatewayDns) return false;
+        var dns = platform.GetDns(settings.AdapterId);
+        return !dns.Matches(DnsConfiguration.ForServer(settings.DnsForGateway(gateway), dns.ProfileServers.Length > 0));
+    }
+
+    private void RestoreDnsAfterReboot(RouteSession session)
+    {
+        var original = session.OriginalDns ?? throw new InvalidOperationException("恢复记录属于上次开机，不能应用到当前网络。");
+        var adapter = platform.GetAdapter(session.AdapterId);
+        if (!original.IsAutomatic && !adapter.Addresses.Any(a => a.Address == session.SourceAddress))
+            throw new InvalidOperationException("上次运行的静态 DNS 尚未恢复，请连接原网络后重试；恢复记录已保留。");
+        var current = platform.GetDns(session.AdapterId);
+        EnsureKnownDns(current, session);
+        ReplaceDns(session.AdapterId, current, original);
+    }
+
+    private static void EnsureKnownDns(DnsConfiguration current, RouteSession session)
+    {
+        if (session.OriginalDns == null) return; // 兼容旧版仅保存路由的恢复记录。
+        var known = session.KnownDns.Append(session.OriginalDns).ToArray();
+        // API 可能在两级 DNS 配置之间部分成功，允许这些已知组合用于回滚。
+        if (!known.Any(d => d.Servers.SequenceEqual(current.Servers, StringComparer.OrdinalIgnoreCase)) ||
+            !known.Any(d => d.ProfileServers.SequenceEqual(current.ProfileServers, StringComparer.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("检测到其他程序更改了该网卡的 DNS，已暂停写入，请检查 DNS 配置。");
+    }
+
+    private void ReplaceDns(Guid adapterId, DnsConfiguration before, DnsConfiguration after)
+    {
+        if (!platform.GetDns(adapterId).Matches(before)) throw new InvalidOperationException("DNS 在操作前发生变化，已取消写入。");
+        if (before.Matches(after)) return;
+        platform.SetDns(adapterId, after);
+        if (!platform.GetDns(adapterId).Matches(after)) throw new InvalidOperationException("DNS 写入后校验未通过。");
     }
 
     private static uint Remaining(uint lifetime, uint elapsed) => lifetime == uint.MaxValue ? lifetime : lifetime > elapsed ? lifetime - elapsed : 0;

@@ -2,6 +2,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using AutoChangeGateWay.Core;
+using Microsoft.Win32;
 
 namespace AutoChangeGateWay.Windows;
 
@@ -84,6 +85,56 @@ public sealed class WindowsNetwork : IRoutePlatform
         var matches = ReadRows().Where(r => IsDefault(r, luid) && Describe(r).SameIdentity(expected)).ToArray();
         if (matches.Length != 1) throw new InvalidOperationException("待删除路由已发生变化，已取消删除。");
         NativeMethods.Check(NativeMethods.DeleteIpForwardEntry2(in matches[0]), "移除目标网卡旧默认路由");
+    }
+
+    public DnsConfiguration GetDns(Guid adapterId)
+    {
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
+            throw new PlatformNotSupportedException("同步 DNS 需要 Windows 10 2004（19041）或更高版本。");
+        GetAdapter(adapterId);
+        var settings = new NativeMethods.DnsInterfaceSettings { Version = 1 };
+        NativeMethods.Check(NativeMethods.GetInterfaceDnsSettings(adapterId, ref settings), "读取所选网卡 DNS");
+        try
+        {
+            // 注册表保存显式配置；不能把 DHCP 当前下发的 DNS 误当作原来的静态配置。
+            using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\" + adapterId.ToString("B"));
+            if (key == null) throw new InvalidOperationException("无法读取所选网卡的 DNS 配置来源，已禁止修改。");
+            string value = key.GetValue("NameServer") as string ?? "";
+            return new DnsConfiguration { Servers = ParseDns(value), ProfileServers = ParseDns(Marshal.PtrToStringUni(settings.ProfileNameServer) ?? "") };
+        }
+        finally { NativeMethods.FreeInterfaceDnsSettings(ref settings); }
+    }
+
+    private static string[] ParseDns(string value) => value.Split([',', ';', ' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+        .Select(s =>
+        {
+            if (!System.Net.IPAddress.TryParse(s, out var ip) || ip.AddressFamily != AddressFamily.InterNetwork)
+                throw new InvalidOperationException("该网卡的 IPv4 DNS 配置含无法识别的地址，已禁止修改。");
+            return ip.ToString();
+        }).ToArray();
+
+    public void SetDns(Guid adapterId, DnsConfiguration configuration)
+    {
+        var current = GetDns(adapterId);
+        foreach (var server in configuration.Servers.Concat(configuration.ProfileServers))
+            if (!System.Net.IPAddress.TryParse(server, out var address) || address.AddressFamily != AddressFamily.InterNetwork)
+                throw new InvalidOperationException("DNS 恢复记录包含无效的 IPv4 地址。");
+        var settings = new NativeMethods.DnsInterfaceSettings { Version = 1, Flags = 2 };
+        settings.NameServer = Marshal.StringToHGlobalUni(string.Join(",", configuration.Servers));
+        try
+        {
+            if (!current.ProfileServers.SequenceEqual(configuration.ProfileServers, StringComparer.OrdinalIgnoreCase))
+            {
+                settings.Flags |= 0x200;
+                settings.ProfileNameServer = Marshal.StringToHGlobalUni(string.Join(",", configuration.ProfileServers));
+            }
+            NativeMethods.Check(NativeMethods.SetInterfaceDnsSettings(adapterId, in settings), "设置所选网卡 IPv4 DNS");
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(settings.NameServer);
+            if (settings.ProfileNameServer != IntPtr.Zero) Marshal.FreeHGlobal(settings.ProfileNameServer);
+        }
     }
 
     public static ProbeResult Probe(AdapterInfo adapter, string source, string gateway, int timeout)
